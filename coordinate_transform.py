@@ -14,7 +14,17 @@ class CoordinateTransformer:
         )
         self.origin = origin
 
+    def _is_valid_number(self, value):
+        if value is None:
+            return False
+        if isinstance(value, float):
+            return not (math.isnan(value) or math.isinf(value))
+        return True
+
     def local_to_wgs84(self, x_local, y_local, z_local=0):
+        if not self._is_valid_number(x_local) or not self._is_valid_number(y_local):
+            return None
+
         if self.origin:
             x_absolute = self.origin["x"] + x_local
             y_absolute = self.origin["y"] + y_local
@@ -27,20 +37,33 @@ class CoordinateTransformer:
         try:
             lon, lat, height = self.transformer.transform(
                 x_absolute, y_absolute, z_absolute,
-                errcheck=True
+                errcheck=False
             )
+
+            if not self._is_valid_number(lon) or not self._is_valid_number(lat):
+                return None
+
             return {"lon": lon, "lat": lat, "height": height}
-        except ProjError as e:
+        except (ProjError, ValueError) as e:
             print(f"Projection error: {e}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error: {e}")
             return None
 
     def wgs84_to_local(self, lon, lat, height=0):
+        if not self._is_valid_number(lon) or not self._is_valid_number(lat):
+            return None
+
         try:
             x_absolute, y_absolute, z_absolute = self.transformer.transform(
                 lon, lat, height,
                 direction="INVERSE",
-                errcheck=True
+                errcheck=False
             )
+
+            if not self._is_valid_number(x_absolute) or not self._is_valid_number(y_absolute):
+                return None
 
             if self.origin:
                 x_local = x_absolute - self.origin["x"]
@@ -52,11 +75,17 @@ class CoordinateTransformer:
                 z_local = z_absolute
 
             return {"x": x_local, "y": y_local, "z": z_local}
-        except ProjError as e:
+        except (ProjError, ValueError) as e:
             print(f"Projection error: {e}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error: {e}")
             return None
 
     def bounding_box_to_wgs84(self, min_x, min_y, min_z, max_x, max_y, max_z):
+        if not all([self._is_valid_number(v) for v in [min_x, min_y, max_x, max_y]]):
+            return None
+
         corners = [
             (min_x, min_y, min_z),
             (min_x, min_y, max_z),
@@ -92,6 +121,9 @@ class CoordinateTransformer:
         }
 
     def bounding_sphere_to_wgs84(self, center_x, center_y, center_z, radius):
+        if not all([self._is_valid_number(v) for v in [center_x, center_y, center_z]]):
+            return None
+
         center_wgs84 = self.local_to_wgs84(center_x, center_y, center_z)
         if not center_wgs84:
             return None
@@ -138,9 +170,12 @@ class CoordinateTransformer:
             )
             if result and "region" in result:
                 r = result["region"]
-                all_lons.extend([r["west"], r["east"]])
-                all_lats.extend([r["south"], r["north"]])
-                all_heights.extend([r["min_height"], r["max_height"]])
+                if self._is_valid_number(r["west"]) and self._is_valid_number(r["east"]):
+                    all_lons.extend([r["west"], r["east"]])
+                if self._is_valid_number(r["south"]) and self._is_valid_number(r["north"]):
+                    all_lats.extend([r["south"], r["north"]])
+                if self._is_valid_number(r["min_height"]) and self._is_valid_number(r["max_height"]):
+                    all_heights.extend([r["min_height"], r["max_height"]])
 
         if not all_lons:
             return None
@@ -150,26 +185,45 @@ class CoordinateTransformer:
             math.radians(min(all_lats)),
             math.radians(max(all_lons)),
             math.radians(max(all_lats)),
-            min(all_heights),
-            max(all_heights)
+            min(all_heights) if all_heights else 0,
+            max(all_heights) if all_heights else 100
         ]
 
     def get_tile_region(self, tile_name, boundary_wgs84):
         if not boundary_wgs84:
             return None
 
-        lons = [p["lon"] for p in boundary_wgs84]
-        lats = [p["lat"] for p in boundary_wgs84]
-        heights = [p["height"] for p in boundary_wgs84]
+        try:
+            lons = []
+            lats = []
+            heights = []
 
-        return [
-            math.radians(min(lons)),
-            math.radians(min(lats)),
-            math.radians(max(lons)),
-            math.radians(max(lats)),
-            min(heights),
-            max(heights)
-        ]
+            for p in boundary_wgs84:
+                if isinstance(p, dict) and "lon" in p and "lat" in p:
+                    lon = p["lon"]
+                    lat = p["lat"]
+                    height = p.get("height", 0)
+
+                    if self._is_valid_number(lon) and self._is_valid_number(lat):
+                        lons.append(lon)
+                        lats.append(lat)
+                        heights.append(height)
+
+            if not lons or not lats:
+                print(f"Warning: No valid coordinates for tile {tile_name}")
+                return None
+
+            return [
+                math.radians(min(lons)),
+                math.radians(min(lats)),
+                math.radians(max(lons)),
+                math.radians(max(lats)),
+                min(heights) if heights else 0,
+                max(heights) if heights else 100
+            ]
+        except Exception as e:
+            print(f"Error getting tile region for {tile_name}: {e}")
+            return None
 
     @staticmethod
     def deg_to_rad(degrees):

@@ -1,7 +1,29 @@
 import json
 import os
+import sys
 from pathlib import Path
 import math
+
+sys.setrecursionlimit(10000)
+
+
+def _clean_nan_inf(value):
+    stack = [(value, None, None)]
+    while stack:
+        current, parent, key = stack.pop()
+        if isinstance(current, dict):
+            for k, v in list(current.items()):
+                if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                    current[k] = 0.0
+                elif isinstance(v, (dict, list)):
+                    stack.append((v, current, k))
+        elif isinstance(current, list):
+            for i, v in enumerate(current):
+                if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                    current[i] = 0.0
+                elif isinstance(v, (dict, list)):
+                    stack.append((v, current, i))
+    return value
 
 
 class TilesetGenerator:
@@ -51,9 +73,17 @@ class TilesetGenerator:
         return tree
 
     def _calculate_geometric_error(self, lod):
-        return max(1.0, 500.0 / (2 ** (lod - 14)))
+        try:
+            error = max(1.0, 500.0 / (2 ** (lod - 14)))
+            if math.isnan(error) or math.isinf(error):
+                return 1.0
+            return error
+        except (OverflowError, ValueError):
+            return 1.0
 
     def _create_tile_node(self, b3dm_path, region, lod, has_children=False):
+        region = self._clean_region(region)
+
         tile = {
             "boundingVolume": {
                 "region": region
@@ -69,6 +99,28 @@ class TilesetGenerator:
             del tile["refine"]
 
         return tile
+
+    def _clean_region(self, region):
+        if not region:
+            return [
+                math.radians(114.29),
+                math.radians(30.67),
+                math.radians(114.31),
+                math.radians(30.68),
+                0,
+                100
+            ]
+
+        cleaned = []
+        for val in region:
+            if isinstance(val, float):
+                if math.isnan(val) or math.isinf(val):
+                    cleaned.append(0.0)
+                else:
+                    cleaned.append(val)
+            else:
+                cleaned.append(val)
+        return cleaned
 
     def generate(self, b3dm_dir, output_dir, regions, bounding_spheres=None):
         b3dm_path = Path(b3dm_dir)
@@ -115,6 +167,8 @@ class TilesetGenerator:
                 "children": root_tiles
             }
 
+        self.tileset = _clean_nan_inf(self.tileset)
+
         tileset_path = output_path / "tileset.json"
 
         with open(str(tileset_path), 'w', encoding='utf-8') as f:
@@ -124,47 +178,67 @@ class TilesetGenerator:
         return True
 
     def _build_tile_tree(self, tile_name, lod_tree, min_lod, max_lod, regions):
-        current_lod = min_lod
-        root_node = None
-        current_node = None
+        lod_nodes = {}
 
-        while current_lod <= max_lod:
-            if tile_name in lod_tree and current_lod in lod_tree[tile_name]:
-                b3dm_files = lod_tree[tile_name][current_lod]
+        for lod in range(min_lod, max_lod + 1):
+            if tile_name in lod_tree and lod in lod_tree[tile_name]:
+                b3dm_files = lod_tree[tile_name][lod]
 
-                for b3dm_file in b3dm_files:
-                    region = regions.get(tile_name)
-                    if not region:
-                        region = [
-                            math.radians(114.29),
-                            math.radians(30.67),
-                            math.radians(114.31),
-                            math.radians(30.68),
-                            0,
-                            100
-                        ]
+                region = regions.get(tile_name)
+                if not region:
+                    region = [
+                        math.radians(114.29),
+                        math.radians(30.67),
+                        math.radians(114.31),
+                        math.radians(30.68),
+                        0,
+                        100
+                    ]
 
-                    has_children = (current_lod + 1) in lod_tree.get(tile_name, {})
+                has_children = (lod + 1) in lod_tree.get(tile_name, {})
 
-                    tile_node = self._create_tile_node(
-                        b3dm_file,
+                if len(b3dm_files) == 1:
+                    node = self._create_tile_node(
+                        b3dm_files[0],
                         region,
-                        current_lod,
+                        lod,
                         has_children
                     )
+                    lod_nodes[lod] = node
+                else:
+                    children = []
+                    for b3dm_file in b3dm_files:
+                        child_node = self._create_tile_node(
+                            b3dm_file,
+                            region,
+                            lod,
+                            has_children=False
+                        )
+                        children.append(child_node)
 
-                    if root_node is None:
-                        root_node = tile_node
-                        current_node = tile_node
-                    else:
-                        if "children" not in current_node:
-                            current_node["children"] = []
-                        current_node["children"].append(tile_node)
-                        current_node = tile_node
+                    parent_node = {
+                        "boundingVolume": {
+                            "region": region
+                        },
+                        "geometricError": self._calculate_geometric_error(lod),
+                        "refine": "ADD",
+                        "children": children
+                    }
+                    lod_nodes[lod] = parent_node
 
-            current_lod += 1
+        for lod in range(min_lod, max_lod):
+            if lod in lod_nodes and (lod + 1) in lod_nodes:
+                parent_node = lod_nodes[lod]
+                child_node = lod_nodes[lod + 1]
 
-        return root_node
+                if "children" not in parent_node:
+                    parent_node["children"] = []
+                parent_node["children"].append(child_node)
+
+                if "refine" not in parent_node:
+                    parent_node["refine"] = "ADD"
+
+        return lod_nodes.get(min_lod)
 
     def _merge_regions(self, regions):
         if not regions:
@@ -177,12 +251,37 @@ class TilesetGenerator:
                 100
             ]
 
-        west = min(r[0] for r in regions)
-        south = min(r[1] for r in regions)
-        east = max(r[2] for r in regions)
-        north = max(r[3] for r in regions)
-        min_height = min(r[4] for r in regions)
-        max_height = max(r[5] for r in regions)
+        west = float('inf')
+        south = float('inf')
+        east = float('-inf')
+        north = float('-inf')
+        min_height = float('inf')
+        max_height = float('-inf')
+
+        for r in regions:
+            if r:
+                try:
+                    west = min(west, r[0] if not (math.isnan(r[0]) or math.isinf(r[0])) else west)
+                    south = min(south, r[1] if not (math.isnan(r[1]) or math.isinf(r[1])) else south)
+                    east = max(east, r[2] if not (math.isnan(r[2]) or math.isinf(r[2])) else east)
+                    north = max(north, r[3] if not (math.isnan(r[3]) or math.isinf(r[3])) else north)
+                    min_height = min(min_height, r[4] if not (math.isnan(r[4]) or math.isinf(r[4])) else min_height)
+                    max_height = max(max_height, r[5] if not (math.isnan(r[5]) or math.isinf(r[5])) else max_height)
+                except (IndexError, TypeError):
+                    continue
+
+        if math.isnan(west) or math.isinf(west):
+            west = math.radians(114.29)
+        if math.isnan(south) or math.isinf(south):
+            south = math.radians(30.67)
+        if math.isnan(east) or math.isinf(east):
+            east = math.radians(114.31)
+        if math.isnan(north) or math.isinf(north):
+            north = math.radians(30.68)
+        if math.isnan(min_height) or math.isinf(min_height):
+            min_height = 0
+        if math.isnan(max_height) or math.isinf(max_height):
+            max_height = 100
 
         return [west, south, east, north, min_height, max_height]
 
@@ -193,10 +292,24 @@ class TilesetGenerator:
         spheres = []
         for tile_name, bs in bounding_spheres.items():
             if bs:
+                center_x = bs.get("center_x", 0)
+                center_y = bs.get("center_y", 0)
+                center_z = bs.get("center_z", 0)
+                radius = bs.get("radius", 0)
+
+                if math.isnan(center_x) or math.isinf(center_x):
+                    center_x = 0
+                if math.isnan(center_y) or math.isinf(center_y):
+                    center_y = 0
+                if math.isnan(center_z) or math.isinf(center_z):
+                    center_z = 0
+                if math.isnan(radius) or math.isinf(radius):
+                    radius = 0
+
                 spheres.append({
                     "tile_name": tile_name,
-                    "center": [bs["center_x"], bs["center_y"], bs["center_z"]],
-                    "radius": bs["radius"]
+                    "center": [center_x, center_y, center_z],
+                    "radius": radius
                 })
 
         self.tileset["boundingSpheres"] = spheres

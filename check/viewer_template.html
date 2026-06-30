@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Tiles Viewer</title>
+    <script src="./cesium/Cesium.js"></script>
+    <link href="./cesium/Widgets/widgets.css" rel="stylesheet">
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        #cesiumContainer { width: 100vw; height: 100vh; }
+        .toolbar {
+            position: absolute; top: 20px; left: 20px;
+            background: rgba(30, 30, 30, 0.9); border-radius: 10px; padding: 15px;
+            color: white; z-index: 100; min-width: 250px;
+            backdrop-filter: blur(10px);
+        }
+        .toolbar h2 { margin: 0 0 10px 0; font-size: 16px; }
+        .toolbar .info { margin: 5px 0; font-size: 12px; color: #aaa; }
+        .toolbar .value { color: #fff; font-weight: bold; }
+        .toolbar .status { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; margin-top: 10px; }
+        .toolbar .status-ok { background: rgba(0,255,0,0.2); color: #0f0; }
+        .toolbar .status-error { background: rgba(255,0,0,0.2); color: #f00; }
+        .toolbar button {
+            display: block; width: 100%; padding: 6px; margin-top: 8px;
+            border: none; border-radius: 4px; cursor: pointer;
+            background: #3B82F6; color: white; font-size: 12px;
+        }
+        .toolbar button:hover { background: #2563EB; }
+        .loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: white; text-align: center; z-index: 200;
+        }
+        .loading .spinner {
+            width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.2);
+            border-top-color: #3B82F6; border-radius: 50%;
+            animation: spin 1s linear infinite; margin: 0 auto 10px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div id="cesiumContainer"></div>
+    
+    <div class="toolbar">
+        <h2>3D Tiles Viewer</h2>
+        <div class="info">Status: <span id="status" class="value status">Loading...</span></div>
+        <div class="info">Tileset: <span class="value">tileset.json</span></div>
+        <div class="info">Position: <span class="value">LAT,LNG</span></div>
+        <button onclick="flyToModel()">定位到模型</button>
+        <button onclick="reloadTileset()">重新加载</button>
+    </div>
+    
+    <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <div>Loading 3D Tiles...</div>
+    </div>
+
+    <script>
+        var viewer;
+        var tileset;
+        var cameraPos = {{CAMERA_POS}};
+
+        function init() {
+            try {
+                console.log('Initializing Cesium viewer...');
+                
+                viewer = new Cesium.Viewer('cesiumContainer', {
+                    terrainProvider: new Cesium.EllipsoidTerrainProvider(),
+                    imageryProvider: new Cesium.UrlTemplateImageryProvider({
+                        url: 'http://t0.tianditu.gov.cn/DataServer?T=vec_w&X={x}&Y={y}&L={z}',
+                        subdomains: ['t0', 't1', 't2', 't3', 't4', 't5', 't6', 't7']
+                    }),
+                    baseLayerPicker: false,
+                    geocoder: false,
+                    homeButton: true,
+                    sceneModePicker: true,
+                    navigationHelpButton: false,
+                    animation: false,
+                    timeline: false,
+                    fullscreenButton: true
+                });
+                
+                viewer.scene.globe.enableLighting = true;
+                
+                console.log('Viewer created successfully');
+                loadTileset();
+            } catch(e) {
+                console.error('Failed to initialize viewer:', e);
+                document.getElementById('status').textContent = 'Init Error';
+                document.getElementById('status').className = 'value status status-error';
+                document.getElementById('loading').style.display = 'none';
+                alert('初始化失败: ' + e.message);
+            }
+        }
+
+        function loadTileset() {
+            try {
+                console.log('Loading tileset from: ./tileset.json');
+                console.log('Cesium.Cesium3DTileset:', Cesium.Cesium3DTileset);
+                
+                tileset = new Cesium.Cesium3DTileset({
+                    url: './tileset.json',
+                    maximumScreenSpaceError: 16
+                });
+                
+                console.log('tileset object:', tileset);
+                console.log('tileset type:', typeof tileset);
+                console.log('tileset properties:', Object.keys(tileset));
+                console.log('tileset.readyPromise:', tileset.readyPromise);
+                
+                viewer.scene.primitives.add(tileset);
+                
+                if (tileset && typeof tileset.readyPromise === 'object') {
+                    tileset.readyPromise.then(function() {
+                        console.log('Tileset loaded successfully');
+                        document.getElementById('loading').style.display = 'none';
+                        document.getElementById('status').textContent = 'Loaded';
+                        document.getElementById('status').className = 'value status status-ok';
+                        
+                        flyToModel();
+                        startStats();
+                    }).otherwise(function(error) {
+                        console.error('Failed to load tileset:', error);
+                        document.getElementById('loading').style.display = 'none';
+                        document.getElementById('status').textContent = 'Load Error';
+                        document.getElementById('status').className = 'value status status-error';
+                        alert('加载失败: ' + error.message);
+                    });
+                } else {
+                    console.log('readyPromise not available, trying with timeout...');
+                    setTimeout(function() {
+                        if (tileset && tileset.boundingSphere) {
+                            console.log('Tileset loaded via timeout');
+                            document.getElementById('loading').style.display = 'none';
+                            document.getElementById('status').textContent = 'Loaded';
+                            document.getElementById('status').className = 'value status status-ok';
+                            
+                            flyToModel();
+                            startStats();
+                        } else {
+                            console.log('Tileset still not ready');
+                        }
+                    }, 5000);
+                }
+            } catch(e) {
+                console.error('Exception loading tileset:', e);
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('status').textContent = 'Exception';
+                document.getElementById('status').className = 'value status status-error';
+                alert('加载异常: ' + e.message);
+            }
+        }
+
+        function flyToModel() {
+            if (tileset && tileset.boundingSphere) {
+                viewer.camera.flyTo({
+                    destination: tileset.boundingSphere,
+                    duration: 2
+                });
+            } else {
+                viewer.camera.setView({
+                    destination: Cesium.Cartesian3.fromDegrees(
+                        cameraPos.longitude,
+                        cameraPos.latitude,
+                        cameraPos.height
+                    ),
+                    orientation: {
+                        heading: Cesium.Math.toRadians(0),
+                        pitch: Cesium.Math.toRadians(-45),
+                        roll: 0
+                    }
+                });
+            }
+        }
+
+        function reloadTileset() {
+            if (tileset) {
+                viewer.scene.primitives.remove(tileset);
+            }
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('status').textContent = 'Loading...';
+            document.getElementById('status').className = 'value status';
+            loadTileset();
+        }
+
+        function startStats() {
+            setInterval(function() {
+                if (viewer && tileset) {
+                    console.log('FPS:', viewer.scene.fps);
+                    console.log('Tiles rendered:', tileset.stats.tilesRendered);
+                }
+            }, 2000);
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
