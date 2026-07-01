@@ -6,5 +6,5 @@ __pycache__/
 Thumbs.db
 .idea/
 *.log
-check/cesium/
+check/Cesium/
 *.zip
